@@ -80,7 +80,7 @@ All modules are **idempotent**, meaning they won’t duplicate actions if trigge
 > Place redacted screenshots in `/assets` and reference them here.
 
 ```md
-[![Form Prefill](./assets/sample_prefill%20form.png)](https://github.com/macchie-ato/reference-check-automation/blob/main/assets/sample_prefill%20form.png)
+![Form Prefill](./assets/sample_prefill%20form.png)
 ![Masterlist Tracker](assets/sample_sheet.png)
 ![PDF Output](assets/pdf_output.png)
 ![Slack DM](assets/slack_dm.png)
