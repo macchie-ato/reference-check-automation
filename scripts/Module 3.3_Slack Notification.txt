@@ -1,0 +1,343 @@
+/**
+ * ============================================
+ * MODULE 3-3 — Notifications (Slack DM + Email fallback, HARD-GATED)
+ * Names are prefixed with M33_ to avoid global collisions.
+ * ============================================
+ *
+ * What it does:
+ *  - Fetches row by Record_ID
+ *  - Verifies hard gates (Verified, PDF_URL, etc.)
+ *  - Sends Slack DM (first) using Slack Bot token (Script Properties or embedded inline)
+ *  - Falls back to Email if Slack fails/unavailable (optional)
+ *  - Stamps Notified + Notified_At, writes any error to Masterlist!R
+ *
+ * Required:
+ *  - Slack app scopes: chat:write, im:write (reinstall app if you add scopes)
+ *  - Tabs & columns exactly as defined below
+ */
+
+// ---------- CONFIG ----------
+const M33_TZ = "";
+const M33_ML_TAB = "";
+const M33_RESPONSES_TAB = "";
+const M33_SLACK_LOOKUP_TAB = ""; // A=TA_Name, B=TA_Email, C=Slack_ID
+const M33_EMAIL_FALLBACK_ENABLED = true; // change to false to hard-disable email fallback
+
+// Masterlist (1-based)
+const M33_ML_COL_A_RECORD_ID = 1;   // A
+const M33_ML_COL_C_CAND_NAME = 3;   // C
+const M33_ML_COL_D_JOB_ID    = 4;   // D
+const M33_ML_COL_E_REF_NAME  = 5;   // E
+const M33_ML_COL_G_TA_NAME   = 7;   // G
+const M33_ML_COL_H_TA_EMAIL  = 8;   // H
+const M33_ML_COL_N_VERIFIED  = 14;  // N
+const M33_ML_COL_O_PDF_URL   = 15;  // O
+const M33_ML_COL_P_NOTIFIED  = 16;  // P
+const M33_ML_COL_Q_NOTIF_AT  = 17;  // Q
+const M33_ML_COL_R_ERROR     = 18;  // R
+
+// Form Responses (0-based for reading)
+const M33_FR_COL_A_TS        = 0;   // A - Timestamp
+const M33_FR_COL_V_RECORD_ID = 21;  // V - Record_ID
+
+// ---------- TOKEN BOOTSTRAP (embedded inline; persisted to Script Properties on first use) ----------
+const M33_SLACK_BOT_TOKEN_INLINE = "xoxb";
+
+/** Returns Slack token from Script Properties; if missing, uses inline and saves it to properties. */
+function M33_getSlackToken_() {
+  const props = PropertiesService.getScriptProperties();
+  const fromProp = (props.getProperty("SLACK_BOT_TOKEN") || "").trim();
+  if (fromProp) return fromProp;
+
+  const inline = (typeof M33_SLACK_BOT_TOKEN_INLINE !== "undefined" ? M33_SLACK_BOT_TOKEN_INLINE : "").trim();
+  if (inline) {
+    props.setProperty("SLACK_BOT_TOKEN", inline);  // bootstrap → persist
+    return inline;
+  }
+  return "";
+}
+
+// ---------- PROPERTY HELPER (generic) ----------
+function M33_getProp_(key) {
+  return (PropertiesService.getScriptProperties().getProperty(key) || "").trim();
+}
+
+// ============= PUBLIC TEST ENTRY POINTS =============
+/** Test from Form Responses row 2 (expects Record_ID in V2) */
+function M33_test_notify_from_form_row2() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const fr = ss.getSheetByName(M33_RESPONSES_TAB);
+  const recordId = fr.getRange(2, M33_FR_COL_V_RECORD_ID + 1).getValue(); // V2
+  if (!recordId) return Logger.log("Form Responses row 2 has no Record_ID");
+  Logger.log("M33 test → Record_ID: %s", recordId);
+  M33_notify_for_record_(String(recordId));
+}
+
+/** Direct call by Record_ID */
+function M33_notify_for_record_(recordId) {
+  const lock = LockService.getDocumentLock();
+  lock.tryLock(30000);
+  try {
+    M33__notifyForRecordInternal_(String(recordId));
+  } catch (err) {
+    Logger.log("M33_notify_for_record_ error: %s", err);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ================= CORE FLOW (HARD-GATED) =================
+function M33__notifyForRecordInternal_(recordId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ml = ss.getSheetByName(M33_ML_TAB);
+  const row = M33__findMasterRowByRecordId_(ml, recordId);
+  if (!row) return Logger.log("M33: No Masterlist row for %s", recordId);
+
+  // Gather fields
+  const verified    = M33__truthy_(ml.getRange(row, M33_ML_COL_N_VERIFIED).getValue());
+  const pdfUrl      = String(ml.getRange(row, M33_ML_COL_O_PDF_URL).getValue() || "");
+  const already     = String(ml.getRange(row, M33_ML_COL_P_NOTIFIED).getValue() || "");
+  const candName    = ml.getRange(row, M33_ML_COL_C_CAND_NAME).getValue();
+  const jobId       = ml.getRange(row, M33_ML_COL_D_JOB_ID).getValue();
+  const refName     = ml.getRange(row, M33_ML_COL_E_REF_NAME).getValue();
+  const taName      = ml.getRange(row, M33_ML_COL_G_TA_NAME).getValue();
+  const taEmail     = ml.getRange(row, M33_ML_COL_H_TA_EMAIL).getValue();
+  const submittedAt = M33__getSubmittedAtForRecord_(recordId);
+
+  // ===== Preflight HARD GATES =====
+  if (!verified)    return M33__fail_(ml, row, "Preflight failed: Not Verified");
+  if (!pdfUrl)      return M33__fail_(ml, row, "Preflight failed: Missing PDF_URL");
+  if (already)      return Logger.log("M33: Skip, already notified for %s", recordId);
+  if (!candName)    return M33__fail_(ml, row, "Preflight failed: Missing Candidate_Name");
+  if (!jobId)       return M33__fail_(ml, row, "Preflight failed: Missing Job_ID");
+  if (!refName)     return M33__fail_(ml, row, "Preflight failed: Missing Referee_Name");
+  if (!submittedAt) return M33__fail_(ml, row, "Preflight failed: Missing Submitted_At (Form Responses)");
+
+  // Reachable channel?
+  const slackToken = M33_getSlackToken_(); // uses property; falls back to inline & persists
+  if (!slackToken) {
+    return M33__fail_(ml, row, "Missing Slack token: set Script Property SLACK_BOT_TOKEN or M33_SLACK_BOT_TOKEN_INLINE");
+  }
+  const slackId = M33__getSlackIdForTA_(taEmail, taName);
+  const hasSlackPath = !!(slackToken && slackId);
+  const hasEmailPath = M33_EMAIL_FALLBACK_ENABLED && !!taEmail;
+  if (!hasSlackPath && !hasEmailPath) {
+    return M33__fail_(ml, row, "Preflight failed: No Slack ID (or token) and no TA_Email");
+  }
+
+  // Build messages
+  const slackText = M33__buildSlackDMText_({
+    candidateName: candName,
+    jobId, refereeName: refName, taName, pdfUrl, recordId, submittedAt
+  });
+  const emailSubject = `Reference check PDF is ready — ${jobId} / ${candName}`;
+  const emailBody = M33__buildEmailBody_({
+    taName, candidateName: candName, jobId, refereeName: refName, pdfUrl, recordId, submittedAt
+  });
+
+  // Send (Slack first; no duplicates)
+  let sent = false, slackErr = "";
+
+  if (hasSlackPath) {
+    try {
+      M33__sendSlackDM_(slackToken, slackId, slackText);
+      sent = true;
+    } catch (e) {
+      slackErr = String(e);
+      Logger.log("M33 Slack DM error: %s", slackErr);
+    }
+  }
+
+  if (!sent && hasEmailPath) {
+    try {
+      MailApp.sendEmail(String(taEmail), emailSubject, emailBody);
+      sent = true;
+    } catch (e) {
+      return M33__fail_(ml, row, "Email send error: " + String(e).slice(0, 180));
+    }
+  }
+
+  if (!sent) return M33__fail_(ml, row, slackErr || "No reachable channel (Slack+Email both unavailable)");
+
+  // Success → write back (keep Slack err note if we fell back to email)
+  ml.getRange(row, M33_ML_COL_P_NOTIFIED).setValue("✅");
+  ml.getRange(row, M33_ML_COL_Q_NOTIF_AT).setValue(
+    Utilities.formatDate(new Date(), M33_TZ, "yyyy-MM-dd HH:mm")
+  );
+  ml.getRange(row, M33_ML_COL_R_ERROR).setValue(slackErr ? ("Slack err→ " + slackErr).slice(0, 500) : "");
+  Logger.log("M33: Notified for %s", recordId);
+}
+
+// ================= MESSAGE BUILDERS =================
+function M33__buildSlackDMText_({ candidateName, jobId, refereeName, taName, pdfUrl, recordId, submittedAt }) {
+  const submitted = submittedAt
+    ? Utilities.formatDate(new Date(submittedAt), M33_TZ, "yyyy-MM-dd HH:mm") + " SGT"
+    : "-";
+  return [
+    "📄 Your reference check PDF is ready",
+    "",
+    `Candidate: ${candidateName || "-"}`,
+    `Job ID: ${jobId || "-"}`,
+    `Referee: ${refereeName || "-"}`,
+    "",
+    `TA Requestor: ${taName || "-"}`,
+    "",
+    `PDF Link: ${pdfUrl || "-"}`,
+    "",
+    `Record ID: ${recordId || "-"}`,
+    `Submitted At: ${submitted}`
+  ].join("n");
+}
+
+function M33__buildEmailBody_({ taName, candidateName, jobId, refereeName, pdfUrl, recordId, submittedAt }) {
+  const submitted = submittedAt
+    ? Utilities.formatDate(new Date(submittedAt), M33_TZ, "yyyy-MM-dd HH:mm") + " SGT"
+    : "-";
+  return [
+    `Dear ${taName || "Team"},`,
+    "",
+    "The reference check you requested has been completed.",
+    "Please find the details below:",
+    "",
+    `Candidate: ${candidateName || "-"}`,
+    `Job ID: ${jobId || "-"}`,
+    `Referee: ${refereeName || "-"}`,
+    "",
+    `PDF Link: ${pdfUrl || "-"}`,
+    "",
+    `Record ID: ${recordId || "-"}`,
+    `Submitted At: ${submitted}`,
+    "",
+    "Best regards,",
+    "People Operations Team"
+  ].join("n");
+}
+
+// ================= SLACK HELPERS (DM) =================
+/** Lookup Slack ID in "Slack ID" tab (A=TA_Name, B=TA_Email, C=Slack_ID) */
+function M33__getSlackIdForTA_(taEmail, taName) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(M33_SLACK_LOOKUP_TAB);
+  if (!sh) return "";
+  const values = sh.getDataRange().getValues();
+  const emailKey = String(taEmail || "").trim().toLowerCase();
+  const nameKey  = String(taName  || "").trim().toLowerCase();
+
+  // match by email (Col B)
+  for (let i = 1; i < values.length; i++) {
+    const e = String(values[i][1] || "").trim().toLowerCase();
+    const id = String(values[i][2] || "").trim();
+    if (e && e === emailKey && id) return id.replace(/^@/, "");
+  }
+  // fallback: match by name (Col A)
+  for (let i = 1; i < values.length; i++) {
+    const n = String(values[i][0] || "").trim().toLowerCase();
+    const id = String(values[i][2] || "").trim();
+    if (n && n === nameKey && id) return id.replace(/^@/, "");
+  }
+  return "";
+}
+
+/** Open DM channel & post message (throws on any Slack error) */
+function M33__sendSlackDM_(token, userId, text) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json; charset=utf-8"
+  };
+
+  // 1) Open IM channel
+  const openResp = UrlFetchApp.fetch("https://slack.com/api/conversations.open", {
+    method: "post",
+    headers,
+    payload: JSON.stringify({ users: userId }),
+    muteHttpExceptions: true
+  });
+  const openJson = M33__safeJson_(openResp.getContentText());
+  if (!openJson.ok || !openJson.channel || !openJson.channel.id) {
+    throw new Error(`Slack conversations.open failed: ${openResp.getContentText()}`);
+  }
+
+  // 2) Send message
+  const postResp = UrlFetchApp.fetch("https://slack.com/api/chat.postMessage", {
+    method: "post",
+    headers,
+    payload: JSON.stringify({ channel: openJson.channel.id, text }),
+    muteHttpExceptions: true
+  });
+  const postJson = M33__safeJson_(postResp.getContentText());
+  if (!postJson.ok) {
+    throw new Error(`Slack chat.postMessage failed: ${postResp.getContentText()}`);
+  }
+}
+
+// ================= SHEET HELPERS =================
+function M33__findMasterRowByRecordId_(sheet, recordId) {
+  const last = sheet.getLastRow();
+  if (last < 2) return null;
+  const ids = sheet.getRange(2, M33_ML_COL_A_RECORD_ID, last - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === String(recordId)) return 2 + i;
+  }
+  return null;
+}
+
+function M33__getSubmittedAtForRecord_(recordId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const fr = ss.getSheetByName(M33_RESPONSES_TAB);
+  const data = fr.getDataRange().getValues();
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][M33_FR_COL_V_RECORD_ID]) === String(recordId)) {
+      return data[r][M33_FR_COL_A_TS] || "";
+    }
+  }
+  return "";
+}
+
+function M33__truthy_(v) {
+  const s = String(v).trim().toLowerCase();
+  return s === "true" || s === "yes" || s === "y" || s === "1" || s === "✅";
+}
+
+function M33__fail_(sheet, row, msg) {
+  sheet.getRange(row, M33_ML_COL_R_ERROR).setValue(String(msg).slice(0, 500));
+  Logger.log(msg);
+}
+
+function M33__safeJson_(txt) {
+  try { return JSON.parse(txt || "{}"); } catch (_) { return {}; }
+}
+
+// ============== DIAGNOSTIC (run on a Masterlist row) ==============
+function M33_diag_master_row(row) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ml = ss.getSheetByName(M33_ML_TAB);
+  const rec = String(ml.getRange(row, M33_ML_COL_A_RECORD_ID).getValue() || "");
+  const verified = M33__truthy_(ml.getRange(row, M33_ML_COL_N_VERIFIED).getValue());
+  const pdf = String(ml.getRange(row, M33_ML_COL_O_PDF_URL).getValue() || "");
+  const notified = String(ml.getRange(row, M33_ML_COL_P_NOTIFIED).getValue() || "");
+  const cand = ml.getRange(row, M33_ML_COL_C_CAND_NAME).getValue();
+  const job  = ml.getRange(row, M33_ML_COL_D_JOB_ID).getValue();
+  const ref  = ml.getRange(row, M33_ML_COL_E_REF_NAME).getValue();
+  const taN  = ml.getRange(row, M33_ML_COL_G_TA_NAME).getValue();
+  const taE  = ml.getRange(row, M33_ML_COL_H_TA_EMAIL).getValue();
+  const subAt = M33__getSubmittedAtForRecord_(rec);
+
+  Logger.log(JSON.stringify({
+    recordId: rec, verified, pdfUrl: pdf, alreadyNotified: notified,
+    candidate: cand, jobId: job, referee: ref, taName: taN, taEmail: taE,
+    submittedAt: subAt, slackId: M33__getSlackIdForTA_(taE, taN),
+    hasToken: !!M33_getSlackToken_()
+  }, null, 2));
+}
+
+// ============== OPTIONAL: token self-test (uses getter) ==============
+function M33_testSlackToken_() {
+  const t = M33_getSlackToken_();
+  if (!t) return Logger.log("No token found.");
+  const resp = UrlFetchApp.fetch("https://slack.com/api/auth.test", {
+    method: "post",
+    headers: { Authorization: `Bearer ${t}` },
+    muteHttpExceptions: true
+  });
+  Logger.log(resp.getContentText());
+}

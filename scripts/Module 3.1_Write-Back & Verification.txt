@@ -1,0 +1,75 @@
+/**
+ * MODULE 3-1 — Verify by Record_ID only (writes "YES" to Col N)
+ * Trigger this function via Spreadsheet → On form submit
+ * Needs: REF_TAB, COL_RECORD_ID (1), COL_RESPONSE_VERIFIED (14)
+ */
+
+function onFormSubmit_VerifyN(e) {
+  try {
+    verifyByRecordIdOnly_(e);
+  } catch (err) {
+    Logger.log('ERROR | onFormSubmit_VerifyN | ' + (err && err.stack || err));
+  }
+}
+
+function verifyByRecordIdOnly_(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName(REF_TAB);
+  if (!master) { Logger.log('WARN | REF_TAB not found: ' + REF_TAB); return; }
+
+  // 1) Try to read Record_ID from namedValues (case/space/underscore tolerant)
+  let recordId = getValueFromNamedValues_(e && e.namedValues, ['record_id','Record_ID','record id','Record ID']).trim();
+
+  // 2) Fallback: read from the response row by header match (works with your Col V)
+  if (!recordId && e && e.range && e.range.getSheet) {
+    const rs = e.range.getSheet();
+    const headers = rs.getRange(1, 1, 1, rs.getLastColumn()).getValues()[0];
+    const idx = indexOfHeaderNormalized_(headers, ['record_id','Record_ID','record id','Record ID']);
+    if (idx > -1) recordId = String(rs.getRange(e.range.getRow(), idx + 1).getValue() || '').trim();
+  }
+
+  if (!recordId) { Logger.log('WARN | No Record_ID found in submission'); return; }
+
+  // 3) Find row in Masterlist by Col A and mark N = "YES"
+  const row = findRowByColEquals_(master, COL_RECORD_ID || 1, recordId);
+  if (!row) { Logger.log('WARN | Record_ID not found in Masterlist | ' + recordId); return; }
+
+  master.getRange(row, COL_RESPONSE_VERIFIED || 14).setValue('YES');
+  Logger.log('INFO | Marked YES | row ' + row + ' | Record_ID ' + recordId);
+}
+
+/* ---------- helpers (local) ---------- */
+
+// tolerant getter: ignores case, spaces, underscores
+function getValueFromNamedValues_(nv, preferredKeys) {
+  if (!nv) return '';
+  const norm = s => String(s || '').toLowerCase().replace(/[s_]+/g,'');
+  const keys = Object.keys(nv);
+  const map = new Map(keys.map(k => [norm(k), k]));
+  for (const want of preferredKeys) {
+    const hit = map.get(norm(want));
+    if (hit) {
+      const v = nv[hit];
+      return Array.isArray(v) ? String(v[0] || '') : String(v || '');
+    }
+  }
+  return '';
+}
+
+// header index by normalized match (0-based)
+function indexOfHeaderNormalized_(headers, candidates) {
+  const norm = s => String(s || '').toLowerCase().replace(/[s_]+/g,'');
+  const wants = new Set(candidates.map(norm));
+  for (let i = 0; i < headers.length; i++) if (wants.has(norm(headers[i]))) return i;
+  return -1;
+}
+
+// first row where column equals value (exact string match)
+function findRowByColEquals_(sheet, col, value) {
+  if (!value) return null;
+  const last = sheet.getLastRow();
+  if (last < 2) return null;
+  const vals = sheet.getRange(2, col, last - 1, 1).getValues();
+  for (let i = 0; i < vals.length; i++) if (String(vals[i][0]) === String(value)) return i + 2;
+  return null;
+}

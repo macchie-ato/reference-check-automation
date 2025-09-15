@@ -1,0 +1,14 @@
+/**
+ * Debug helper: confirm the script can open your sheet/tab and read headers.
+ */
+function testConnection_() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(REF_TAB);
+  if (!sh) {
+    console.log("❌ Could not find sheet tab: " + REF_TAB);
+    return;
+  }
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  console.log("✅ Connected. Tab name: " + sh.getName());
+  console.log("Headers: " + JSON.stringify(headers));
+}

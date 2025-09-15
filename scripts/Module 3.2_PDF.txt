@@ -1,0 +1,334 @@
+/**
+ * ============================================
+ * MODULE 3-2 — PDF Generation (Final, E2E Testable)
+ * ============================================
+ * Steps:
+ *  2) chooseTemplate_(recordId)
+ *  3) buildPdf_Clean_(recordId, templateId)
+ *  4) savePdfToDrive_(recordId, pdfBlob)
+ *  5) writeBackLinks_(recordId, fileUrl)
+ * Includes: helpers + idempotent test_end_to_end_row2()
+ */
+
+// ---------- GLOBAL CONFIG ----------
+const RESPONSES_TAB = "Form Responses";
+const MASTERLIST_TAB = "Masterlist";
+const TIMEZONE = "Asia/Singapore";
+
+// Root folder for Reference Checks
+const ROOT_FOLDER_ID = "";
+
+// Template Doc IDs
+const TEMPLATE_A = ""; // Peer
+const TEMPLATE_B = ""; // Reporting Manager + No
+const TEMPLATE_C = ""; // Reporting Manager + Yes
+
+// ---------- FORM RESPONSES (0-based column indices) ----------
+const COL_A_TS          = 0;   // A - Timestamp
+const COL_B_RESP_EMAIL  = 1;   // B - Email Address
+const COL_C_CAND_NAME   = 2;   // C - Candidate Name
+const COL_D_REF_NAME    = 3;   // D - Referee's Name
+const COL_E_REF_CONTACT = 4;   // E - Referee's Contact (email + phone)
+const COL_H_REL         = 7;   // H - Relationship (Peer / Reporting Manager)
+const COL_N_MANAGER     = 13;  // N - Is the person leading teams (Yes/No)
+const COL_V_RECORD_ID   = 21;  // V - Record_ID
+const COL_W_CAND_ID     = 22;  // W - Candidate_ID
+
+// ---------- MASTERLIST (1-based for Range API) ----------
+const ML_COL_RECORD_ID = 1;   // A
+const ML_COL_CAND_ID   = 2;   // B
+const ML_COL_CAND_NAME = 3;   // C
+const ML_COL_JOB_ID    = 4;   // D
+const ML_COL_REF_NAME  = 5;   // E
+const ML_COL_PDF_URL   = 15;  // O
+
+// ---------- FORM RESPONSES write-back (1-based) ----------
+const FR_COL_RECORD_ID = 22;  // V
+const FR_COL_PDF_URL   = 24;  // X
+const FR_COL_SAVED_AT  = 25;  // Y
+
+
+// ==================================
+// Step 2 — Template selection
+// ==================================
+function chooseTemplate_(recordId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const responses = ss.getSheetByName(RESPONSES_TAB);
+    const data = responses.getDataRange().getValues();
+
+    const row = data.find(r => String(r[COL_V_RECORD_ID]) === String(recordId));
+    if (!row) {
+      console.warn("Record_ID not found in Form Responses:", recordId);
+      return null;
+    }
+
+    const valH = String(row[COL_H_REL] || "").trim().toLowerCase();
+    const valN = String(row[COL_N_MANAGER] || "").trim().toLowerCase();
+
+    Logger.log("DEBUG: Record_ID=%s | ColH=%s | ColN=%s", recordId, valH, valN);
+
+    const isPeer = valH.includes("peer");
+    const isReportingMgr = valH.includes("reporting manager") || valH.includes("manager");
+
+    if (isPeer) return TEMPLATE_A;
+    if (isReportingMgr && valN === "no") return TEMPLATE_B;
+    if (isReportingMgr && valN === "yes") return TEMPLATE_C;
+
+    console.warn("No template matched:", recordId, valH, valN);
+    return null;
+  } catch (err) {
+    console.error("chooseTemplate_ failed", err);
+    return null;
+  }
+}
+
+
+// ==================================
+// Step 3 — CLEAN PDF build (placeholders only + footer)
+// ==================================
+function buildPdf_Clean_(recordId, templateId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(RESPONSES_TAB);
+    const data = sh.getDataRange().getValues();
+    const headers = data[0];
+
+    const row = data.find(r => String(r[COL_V_RECORD_ID]) === String(recordId));
+    if (!row) throw new Error("Record_ID not found: " + recordId);
+
+    // base fields
+    const submittedAt    = row[COL_A_TS];
+    const responderEmail = row[COL_B_RESP_EMAIL];
+    const candidateName  = row[COL_C_CAND_NAME];
+    const refereeName    = row[COL_D_REF_NAME];
+    const refereeContact = String(row[COL_E_REF_CONTACT] || "");
+    const refereeEmail   = extractEmail_(refereeContact);
+    const candidateId    = row[COL_W_CAND_ID];
+
+    // tolerant header lookup (first contains-match wins)
+    const findHeaderIdxByKeywords_ = (keywords) => {
+      const lower = headers.map(h => String(h || "").toLowerCase());
+      for (const kw of keywords) {
+        const i = lower.findIndex(h => h.includes(kw.toLowerCase()));
+        if (i !== -1) return i;
+      }
+      return -1;
+    };
+
+    // 4 placeholders we fill
+    const PLACEHOLDER_MAP = {
+      "{{Responsibilities}}":   ["main responsibilities", "responsibilities"],
+      "{{Collaboration}}":      ["collaborate", "work with others", "collaboration"],
+      "{{PerformanceRating}}":  ["overall job performance", "rate the candidate"],
+      "{{AdditionalComments}}": ["anything else", "did not cover", "additional"]
+    };
+
+    // 1) copy template
+    const templateFile = DriveApp.getFileById(templateId);
+    const tempFile = templateFile.makeCopy(`TEMP_${recordId}_${Date.now()}`);
+    const tempDocId = tempFile.getId();
+
+    // 2) open + replace placeholders
+    const doc = DocumentApp.openById(tempDocId);
+    const body = doc.getBody();
+
+    // header/footer placeholders (safe to run even if not present)
+    replaceAll_(body, "{{Candidate_Name}}", candidateName);
+    replaceAll_(body, "{{CandidateName}}",  candidateName);
+    replaceAll_(body, "{{Candidate_ID}}",   candidateId);
+    replaceAll_(body, "{{CandidateID}}",    candidateId);
+
+    replaceAll_(body, "{{Referee_Name}}",   refereeName);
+    replaceAll_(body, "{{RefereeName}}",    refereeName);
+    replaceAll_(body, "{{Referee_Email}}",  refereeEmail || "");
+    replaceAll_(body, "{{RefereeEmail}}",   refereeEmail || "");
+
+    replaceAll_(body, "{{Record_ID}}",      recordId);
+    replaceAll_(body, "{{Submitted_At}}",   formatDate_(submittedAt));
+    replaceAll_(body, "{{Responder_Email}}",responderEmail || "");
+    replaceAll_(body, "{{ResponderEmail}}", responderEmail || "");
+
+    // Q&A placeholders
+    Object.keys(PLACEHOLDER_MAP).forEach(ph => {
+      const idx = findHeaderIdxByKeywords_(PLACEHOLDER_MAP[ph]);
+      const ans = (idx !== -1) ? String(row[idx] || "") : "";
+      replaceAll_(body, ph, ans);
+    });
+
+    // 3) footer metadata block (for ALL templates)
+    body.appendParagraph("");
+    body.appendParagraph("───────────────");
+    const metaTitle = body.appendParagraph("Reference Metadata");
+    metaTitle.setBold(true);
+    body.appendParagraph(`Candidate Name: ${candidateName || ""}`);
+    body.appendParagraph(`Candidate ID: ${candidateId || ""}`);
+    body.appendParagraph(`Referee Name: ${refereeName || ""}`);
+    body.appendParagraph(`Referee Email: ${refereeEmail || ""}`);
+    body.appendParagraph(`Record ID: ${recordId || ""}`);
+    body.appendParagraph(`Submitted At: ${formatDate_(submittedAt)}`);
+    body.appendParagraph(`Responder Email: ${responderEmail || ""}`);
+    body.appendParagraph("───────────────");
+
+    doc.saveAndClose();
+
+    // 4) export PDF + delete temp doc
+    const pdfBlob = DriveApp.getFileById(tempDocId).getAs(MimeType.PDF).setName(`TEMP_${recordId}.pdf`);
+    DriveApp.getFileById(tempDocId).setTrashed(true);
+    return pdfBlob;
+  } catch (err) {
+    console.error("buildPdf_Clean_ failed", err);
+    return null;
+  }
+}
+
+
+// ==================================
+// Step 4 — Save PDF to Drive
+// ==================================
+function savePdfToDrive_(recordId, pdfBlob) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ml = ss.getSheetByName(MASTERLIST_TAB);
+    const row = findMasterRowByRecordId_(recordId);
+    if (!row) throw new Error("Masterlist row not found for Record_ID: " + recordId);
+
+    const jobId       = ml.getRange(row, ML_COL_JOB_ID).getValue();    // D
+    const candidate   = ml.getRange(row, ML_COL_CAND_NAME).getValue(); // C
+    const refereeName = ml.getRange(row, ML_COL_REF_NAME).getValue();  // E
+
+    const rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
+    const subfolderName = `${sanitize_(jobId)}_${sanitize_(candidate)}`;
+    const subfolder = getOrCreateSubfolder_(rootFolder, subfolderName);
+
+    const stamp = Utilities.formatDate(new Date(), TIMEZONE, "yyyyMMdd-HHmm");
+    const fileName = `${sanitize_(jobId)}_${sanitize_(refereeName)}_${stamp}.pdf`;
+    pdfBlob.setName(fileName);
+
+    const file = subfolder.createFile(pdfBlob);
+    return file;
+  } catch (err) {
+    console.error("savePdfToDrive_ failed", err);
+    return null;
+  }
+}
+
+
+// ==================================
+// Step 5 — Write back links & timestamps
+// ==================================
+function writeBackLinks_(recordId, fileUrl) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Masterlist
+    const ml = ss.getSheetByName(MASTERLIST_TAB);
+    const mlRow = findMasterRowByRecordId_(recordId);
+    if (mlRow) {
+      ml.getRange(mlRow, ML_COL_PDF_URL).setValue(fileUrl);
+    }
+
+    // Form Responses
+    const fr = ss.getSheetByName(RESPONSES_TAB);
+    const lastRow = fr.getLastRow();
+    if (lastRow >= 2) {
+      const ids = fr.getRange(2, FR_COL_RECORD_ID, lastRow - 1, 1).getValues(); // V2:V
+      for (let i = 0; i < ids.length; i++) {
+        if (String(ids[i][0]) === String(recordId)) {
+          const r = 2 + i;
+          fr.getRange(r, FR_COL_PDF_URL).setValue(fileUrl); // X
+          fr.getRange(r, FR_COL_SAVED_AT).setValue(
+            Utilities.formatDate(new Date(), TIMEZONE, "yyyy-MM-dd HH:mm")
+          ); // Y
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("writeBackLinks_ failed", err);
+  }
+}
+
+
+// ---------- Helpers ----------
+function extractEmail_(text) {
+  const m = String(text || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+.[A-Z]{2,}/i);
+  return m ? m[0] : "";
+}
+
+function replaceAll_(body, placeholder, value) {
+  body.replaceText(placeholder, value || "");
+}
+
+function formatDate_(d) {
+  if (!d) return "";
+  try { return Utilities.formatDate(new Date(d), TIMEZONE, "yyyy-MM-dd HH:mm"); }
+  catch (e) { return Utilities.formatDate(new Date(), TIMEZONE, "yyyy-MM-dd HH:mm"); }
+}
+
+function sanitize_(s) {
+  return String(s || "")
+    .replace(/[\/:*?"<>|#%{}~]/g, "_")
+    .replace(/s+/g, " ")
+    .trim();
+}
+
+function getOrCreateSubfolder_(parent, name) {
+  const it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return parent.createFolder(name);
+}
+
+function findMasterRowByRecordId_(recordId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(MASTERLIST_TAB);
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return null;
+  const values = sh.getRange(2, ML_COL_RECORD_ID, lastRow - 1, 1).getValues(); // A2:A
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][0]) === String(recordId)) return 2 + i;
+  }
+  return null;
+}
+
+
+// ==================================
+// End-to-end test (Row 2) — idempotent
+// ==================================
+function test_end_to_end_row2() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const fr = ss.getSheetByName(RESPONSES_TAB);
+  const recordId = fr.getRange(2, FR_COL_RECORD_ID).getValue(); // V2
+
+  // idempotency: skip if Masterlist already has URL
+  const ml = ss.getSheetByName(MASTERLIST_TAB);
+  const mlRow = findMasterRowByRecordId_(recordId);
+  if (!mlRow) return Logger.log("No Masterlist row for %s", recordId);
+
+  const existingUrl = ml.getRange(mlRow, ML_COL_PDF_URL).getValue();
+  if (existingUrl) {
+    Logger.log("Skip: PDF_URL already exists → %s", existingUrl);
+    return;
+  }
+
+  // Step 2
+  const templateId = chooseTemplate_(recordId);
+  if (!templateId) return Logger.log("No template matched for %s", recordId);
+
+  // Step 3
+  const pdfBlob = buildPdf_Clean_(recordId, templateId);
+  if (!pdfBlob) return Logger.log("PDF build failed for %s", recordId);
+
+  // Step 4
+  const file = savePdfToDrive_(recordId, pdfBlob);
+  if (!file) return Logger.log("Drive save failed for %s", recordId);
+
+  // Optional default sharing (uncomment if desired)
+  // file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW);
+
+  Logger.log("PDF saved: %s", file.getUrl());
+
+  // Step 5
+  writeBackLinks_(recordId, file.getUrl());
+  Logger.log("Write-back completed for %s", recordId);
+}

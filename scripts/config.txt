@@ -1,0 +1,125 @@
+/***** CONFIG — locked-in, minimal (for Modules 1–2 and 3-1) *****/
+
+// ==== IDs & URLs ====
+const SHEET_ID        = ''; // Masterlist spreadsheet
+const REF_TAB         = '';                                    // Main tracker tab
+const FORM_ID         = ''; // Google Form RAW ID
+const DRIVE_FOLDER_ID = '';                         // PDFs (used later)
+
+// ==== Form hidden field entry IDs ====
+const ENTRY_RECORD_ID    = ''; // hidden form item: record_id
+const ENTRY_CANDIDATE_ID = '';  // hidden form item: candidate_id
+
+// ==== Template routing (for 3-2/3-3 later) ====
+const TEMPLATE_MAP = [
+  { h: 'Peer',              n: 'No',  docId: '' },
+  { h: 'Reporting Manager', n: 'No',  docId: '' },
+  { h: 'Reporting Manager', n: 'Yes', docId: '' }
+];
+
+// ==== Slack (for 3-3 later) ====
+const SLACK_BOT_TOKEN    = 'xoxb-';
+const SLACK_ID_TAB       = 'Slack ID';
+const SLACK_ID_EMAIL_HDR = 'Email';
+const SLACK_ID_ID_HDR    = 'Slack_ID';
+
+// Admin routing + test flag
+const ADMIN_ALERT_EMAILS = [
+  'xxxxx@domain.com',
+  
+];
+const TEST_MODE = true;
+
+// ==== Masterlist headers (Row 1 exact) ====
+// A–J = Module 1; K–M = Module 2; N–Q = Module 3-1.
+const HDR = {
+  // Module 1 (A–J)
+  recordId:             'Record_ID',                 // A
+  candidateId:          'Candidate_ID',              // B
+  candidateName:        'Candidate_Name',            // C
+  jobId:                'Job_ID (SmartRecruiters)',  // D
+  refereeName:          'Referee_Name',              // E
+  refereeEmail:         'Referee_Email',             // F
+  taName:               'TA_Name',                   // G
+  taEmail:              'TA_Email',                  // H
+  processFlag:          'Process?',                  // I (Checkbox)
+  prefillLink:          'Prefilled_Link',            // J
+
+  // Module 2 (K–M)
+  emailedCheckbox:      'Draft Created?',            // K  <-- renamed
+  emailDraftId:         'Email_Draft_ID',            // L
+  emailDraftCreatedAt:  'Email_Draft_Created_At',    // M
+
+  // Module 3-1 (N–Q)
+  responseVerified:     'Response_Verified?',        // N
+  submittedAt:          'Submitted_At',              // O
+  responderEmail:       'Responder_Email',           // P
+  submissionJson:       'Submission_JSON',           // Q
+
+  // Module 3-2/3-3 (R+)
+  pdfUrl:               'PDF_URL',
+  slackNotifiedFlag:    'Slack_Notified?',
+  slackNotifiedAt:      'Slack_Notified_At',
+  slackError:           'Slack_Error',
+  srSync:               'SR_Sync?',
+  srStatus:             'SR_Status',
+  notes:                'Notes'
+};
+
+// ==== Form item titles (must match the Form exactly) ====
+const FORM_ITEMS = {
+  recordId:        'record_id',                 // hidden
+  candidateId:     'candidate_id',              // hidden
+  candidateName:   'Candidate Name',
+  refereeName:     'Referee Name',
+  jobTitle:        'Job Title',
+  relationType:    'Relationship_to_Candidate',
+  managedDirectly: 'Managed_Directly'
+};
+
+// ==== Column indexes for Module 3-1 write-back ====
+const COL_RECORD_ID         = 1;   // A
+const COL_CANDIDATE_ID      = 2;   // B
+const COL_RESPONSE_VERIFIED = 14;  // N
+const COL_SUBMITTED_AT      = 15;  // O
+const COL_RESPONDER_EMAIL   = 16;  // P
+const COL_SUBMISSION_JSON   = 17;  // Q
+
+// Optional copy-backs (keep empty if not used)
+const FIELD_MAP = {};
+
+/***** Behavior switches for Modules 1–2 *****/
+
+// Always open sheet by ID (safer)
+const USE_SHEET_ID = true;
+
+// Gate fields for Module 1 (must be filled before TA can proceed)
+const GATE_FIELDS = [
+  HDR.candidateId,
+  HDR.candidateName,
+  HDR.jobId,
+  HDR.refereeName,
+  HDR.refereeEmail,
+  HDR.taName,
+  HDR.taEmail
+]; // B..H
+
+// TA-controlled mode (no auto-ticks)
+const AUTO_TICK_PROCESS    = false;               // TA controls I
+const AUTO_PREFILL_ON_PASS = false;               // Generate only when TA ticks I and gate is OK
+const SHOW_TOASTS          = true;
+const TOAST_ON_BLOCK       = true;
+
+// Columns that must be true checkboxes (I and K)
+const CHECKBOX_FIELDS = [HDR.processFlag, HDR.emailedCheckbox];
+
+// Header sanity check
+const ENFORCE_HEADER_MATCH     = true;
+const EXPECTED_HEADERS_VERSION = '2025-09-11';
+
+// No periodic sweep in TA-controlled mode
+const ENABLE_TIME_SWEEP  = false;
+const TIME_SWEEP_MINUTES = 30;
+
+// Module 2 behavior: TA toggles K to create a DRAFT (no send)
+const EMAIL_TICK_STRATEGY = 'manual_toggle';

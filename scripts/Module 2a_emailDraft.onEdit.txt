@@ -1,0 +1,158 @@
+/**
+ * Module 2 — When K (Emailed?) is checked, create a Gmail draft and stamp L/M.
+ * Self-contained: includes embedded template + merge helpers.
+ *
+ * Generates:
+ *   - L: Email_Draft_ID
+ *   - M: Email_Draft_Created_At (ISO)
+ *
+ * Gate (all must be true):
+ *   - K (Emailed?) == TRUE
+ *   - A (Record_ID) exists
+ *   - J (Prefilled_Link) exists
+ *   - F (Referee_Email) exists
+ *
+ * Requires (from config.gs):
+ *   - REF_TAB
+ *   - HDR (with keys: recordId, candidateId, candidateName, jobId, refereeName, refereeEmail, taName, taEmail, prefillLink, emailedCheckbox, emailDraftId, emailDraftCreatedAt)
+ * Requires (from utils.gs):
+ *   - getCol_ (shared header→column helper)
+ */
+
+// ===== Embedded email template (no external file needed) =====
+const DEFAULT_SUBJECT = '[Company Name]: Reference Check Request for {{Candidate_Name}}';
+
+const DEFAULT_HTML = `
+<p>Dear {{Referee_Name}},</p>
+
+<p>I am writing to request your assistance in providing a reference for {{Candidate_Name}} who has listed you as a professional reference.</p>
+
+<p>{{Candidate_Name}} is in consideration for a position in our organisation and we are in the process of evaluating their qualifications for the role. I would appreciate it if you could take a few moments to provide us with your assessment of the candidate’s skills, strengths, areas for development, and overall work performance.</p>
+
+<p>Please let us know if you have any reservations about providing a reference or if you require additional information from us. All information provided will be held in confidence and will only be used for the purpose of evaluating the candidate for the position.</p>
+
+<p>Here is the link to the <a href="{{Prefilled_Link}}">reference check questionnaire</a> that we would like to request for your completion.</p>
+
+<p>Thank you and we look forward to your valuable input.</p>
+
+<p>Best regards,</p>
+
+<p>{{TA_Name}}<br>{{TA_Email}}</p>
+`;
+
+// ---- helpers (local to this file, non-global) ----
+function mergeTemplate_(tpl, data) {
+  return tpl.replace(/{{(w+)}}/g, (m, key) =>
+    (key in data && data[key] != null) ? String(data[key]) : m
+  );
+}
+
+function validateEmbeddedTemplate_() {
+  const required = ['Candidate_Name', 'Referee_Name', 'Prefilled_Link', 'TA_Name', 'TA_Email'];
+  const missing = required.filter(k => !DEFAULT_HTML.includes(`{{${k}}}`) && !DEFAULT_SUBJECT.includes(`{{${k}}}`));
+  if (missing.length) {
+    SpreadsheetApp.getActive().toast('Template missing: ' + missing.join(', '), 'Template warning', 6);
+    return false;
+  }
+  return true;
+}
+
+// ---- Trigger entrypoint (renamed to avoid clashing with unified dispatcher) ----
+// NOTE: If you are using the unified onEdit dispatcher in Module 1–2, you do NOT
+// need to add a trigger for this. The dispatcher will call handleEmailDraftForRow_ directly.
+function onEdit_M2_(e) {
+  try {
+    if (!e || !e.range) return;
+    const sh = e.range.getSheet();
+    if (sh.getName() !== REF_TAB) return;
+    const row = e.range.getRow();
+    if (row <= 1) return;
+
+    const emailedCol = getCol_(sh, HDR.emailedCheckbox) || 11; // K
+    if (e.range.getColumn() !== emailedCol) return; // only when K changes
+
+    handleEmailDraftForRow_(sh, row, /*toastOnBlock=*/true);
+  } catch (err) {
+    SpreadsheetApp.getActive().toast('Module 2 onEdit error: ' + err, 'Script error', 6);
+  }
+}
+
+/** Core: if K is checked and prerequisites exist → create Gmail draft once, stamp L/M. */
+function handleEmailDraftForRow_(sh, row, toastOnBlock) {
+  const aCol = getCol_(sh, HDR.recordId)             || 1;  // A
+  const bCol = getCol_(sh, HDR.candidateId)          || 2;  // B
+  const cCol = getCol_(sh, HDR.candidateName)        || 3;  // C
+  const dCol = getCol_(sh, HDR.jobId)                || 4;  // D
+  const eCol = getCol_(sh, HDR.refereeName)          || 5;  // E
+  const fCol = getCol_(sh, HDR.refereeEmail)         || 6;  // F
+  const gCol = getCol_(sh, HDR.taName)               || 7;  // G
+  const hCol = getCol_(sh, HDR.taEmail)              || 8;  // H
+  const jCol = getCol_(sh, HDR.prefillLink)          || 10; // J
+  const kCol = getCol_(sh, HDR.emailedCheckbox)      || 11; // K
+  const lCol = getCol_(sh, HDR.emailDraftId)         || 12; // L
+  const mCol = getCol_(sh, HDR.emailDraftCreatedAt)  || 13; // M
+
+  const emailedChecked = !!sh.getRange(row, kCol).getValue();
+  if (!emailedChecked) return;
+
+  // Idempotent guard
+  const existingDraftId = String(sh.getRange(row, lCol).getValue() || '').trim();
+  if (existingDraftId) return;
+
+  // Required fields
+  const recId   = String(sh.getRange(row, aCol).getValue() || '').trim();
+  const prefill = String(sh.getRange(row, jCol).getValue() || '').trim();
+  const toEmail = String(sh.getRange(row, fCol).getValue() || '').trim();
+
+  const missing = [];
+  if (!recId)   missing.push('Record_ID (A)');
+  if (!prefill) missing.push('Prefilled_Link (J)');
+  if (!toEmail) missing.push('Referee_Email (F)');
+
+  if (missing.length) {
+    if (toastOnBlock) {
+      SpreadsheetApp.getActive().toast('Cannot create draft. Missing: ' + missing.join(', '), 'Emailed? blocked', 6);
+    }
+    sh.getRange(row, kCol).setValue(false); // uncheck to reflect blocked action
+    return;
+  }
+
+  // Optional context for merge
+  const candId   = String(sh.getRange(row, bCol).getValue() || '').trim();
+  const candName = String(sh.getRange(row, cCol).getValue() || '').trim();
+  const jobId    = String(sh.getRange(row, dCol).getValue() || '').trim();
+  const refName  = String(sh.getRange(row, eCol).getValue() || '').trim();
+  const taName   = String(sh.getRange(row, gCol).getValue() || '').trim();
+  const taEmail  = String(sh.getRange(row, hCol).getValue() || '').trim();
+
+  // Build merge data
+  const data = {
+    Record_ID: recId,
+    Record_ID_short: recId ? recId.slice(0, 8) : '',
+    Candidate_ID: candId,
+    Candidate_Name: candName,
+    Job_ID: jobId,
+    Referee_Name: refName,
+    Referee_Email: toEmail,
+    TA_Name: taName,
+    TA_Email: taEmail,
+    Prefilled_Link: prefill
+  };
+
+  // Validate & merge template
+  validateEmbeddedTemplate_();
+  const subject = mergeTemplate_(DEFAULT_SUBJECT, data);
+  const html    = mergeTemplate_(DEFAULT_HTML, data);
+
+  // Create Gmail draft
+  const draft = GmailApp.createDraft(toEmail, subject, '', {
+    htmlBody: html,
+    cc: taEmail ? taEmail : undefined
+  });
+
+  // Write L/M
+  sh.getRange(row, lCol).setValue(draft.getId());
+  sh.getRange(row, mCol).setValue(new Date().toISOString());
+
+  SpreadsheetApp.getActive().toast('Draft created from embedded template (L/M updated).', 'Success', 3);
+}

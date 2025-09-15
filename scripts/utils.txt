@@ -1,0 +1,187 @@
+/** UTILITIES **/
+
+function getRefSheet_() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  return ss.getSheetByName(REF_TAB);
+}
+
+function getHeaderMap_(sheet) {
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1,1,1,lastCol).getValues()[0];
+  const map = {};
+  headers.forEach((h, idx) => map[String(h).trim()] = idx+1);
+  return map;
+}
+
+// Simple header → column resolver (1-based)
+function getCol_(sh, headerName) {
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  for (let c = 0; c < headers.length; c++) {
+    if (String(headers[c]).trim() === String(headerName).trim()) return c + 1;
+  }
+  return null;
+}
+
+function getRowByRecordId_(recordId) {
+  const sh = getRefSheet_();
+  const values = sh.getDataRange().getValues();
+  const headerMap = getHeaderMap_(sh);
+  const col = headerMap[HDR.recordId];
+  if (!col) return -1;
+
+  for (let r = 2; r <= values.length; r++) {
+    if (String(values[r-1][col-1]).trim() === String(recordId).trim()) return r;
+  }
+  return -1;
+}
+
+function timestamp_() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+}
+
+function setCellByHeader_(sheet, row, headerName, value) {
+  const headerMap = getHeaderMap_(sheet);
+  const col = headerMap[headerName];
+  if (!col) return;
+  sheet.getRange(row, col).setValue(value);
+}
+
+function getCellByHeader_(sheet, row, headerName) {
+  const headerMap = getHeaderMap_(sheet);
+  const col = headerMap[headerName];
+  if (!col) return '';
+  return sheet.getRange(row, col).getValue();
+}
+
+function ensureRecordId_(sheet, row) {
+  let id = getCellByHeader_(sheet, row, HDR.recordId);
+  if (!id) {
+    id = 'RC-' + Utilities.getUuid().split('-')[0].toUpperCase();
+    setCellByHeader_(sheet, row, HDR.recordId, id);
+  }
+  return id;
+}
+
+function getForm_() {
+  return FormApp.openById(FORM_ID);
+}
+
+/** Accepts raw Form ID or full URL; returns clean ID. */
+function sanitizeFormId_(v) {
+  if (!v) return v;
+  const s = String(v);
+  let m = s.match(//forms/d/e/([A-Za-z0-9_-]+)/); if (m) return m[1];
+  m = s.match(//forms/d/([A-Za-z0-9_-]+)/);        if (m) return m[1];
+  m = s.match(//d/e/([A-Za-z0-9_-]+)/);            if (m) return m[1];
+  m = s.match(//d/([A-Za-z0-9_-]+)/);               if (m) return m[1];
+  return s.split('?')[0];
+}
+
+/**
+ * Build a prefilled URL carrying hidden record_id + candidate_id.
+ * Flexible:
+ *  - buildPrefillUrl_(recordId, candidateId)
+ *  - buildPrefillUrl_(rowNumber)   // backward-compatible: pulls values from that row
+ */
+function buildPrefillUrl_(a, b) {
+  // Backward-compatible row signature
+  if (typeof a === 'number' && (b === undefined || b === null)) {
+    const row = a;
+    const sh = getRefSheet_();
+    const rec = String(getCellByHeader_(sh, row, HDR.recordId) || '').trim();
+    const cid = String(getCellByHeader_(sh, row, HDR.candidateId) || '').trim();
+    return buildPrefillUrl_(rec, cid); // recurse to the (recordId,candidateId) branch
+  }
+
+  // (recordId, candidateId) signature
+  const recordId    = String(a || '').trim();
+  const candidateId = String(b || '').trim();
+
+  const fid = sanitizeFormId_(FORM_ID);
+  const usingDe = fid && fid.startsWith('1FAIpQL');
+
+  const base = usingDe
+    ? `https://docs.google.com/forms/d/e/${fid}/viewform?usp=pp_url`
+    : `https://docs.google.com/forms/d/${fid}/viewform?usp=pp_url`;
+
+  const params = [];
+  if (recordId && ENTRY_RECORD_ID)    params.push(`entry.${ENTRY_RECORD_ID}=${encodeURIComponent(recordId)}`);
+  if (candidateId && ENTRY_CANDIDATE_ID) params.push(`entry.${ENTRY_CANDIDATE_ID}=${encodeURIComponent(candidateId)}`);
+
+  return params.length ? `${base}&${params.join('&')}` : base;
+}
+
+/** Template picker for later modules */
+function pickTemplateId_(relationType, managedDirectly) {
+  const hit = TEMPLATE_MAP.find(t =>
+    String(t.h).toLowerCase() === String(relationType).toLowerCase() &&
+    String(t.n).toLowerCase() === String(managedDirectly).toLowerCase()
+  );
+  return hit ? hit.docId : null;
+}
+
+/** Render a Google Doc template to PDF in a folder, replacing {{placeholders}} with dataObj */
+function makePdfFromTemplate_(templateId, dataObj, destFolderId) {
+  // Copy template to folder
+  const templateFile = DriveApp.getFileById(templateId);
+  const folder = DriveApp.getFolderById(destFolderId);
+  const tempCopy = templateFile.makeCopy(`TMP_${dataObj.record_id}_${Date.now()}`, folder);
+  const docId = tempCopy.getId();
+
+  // Replace placeholders {{key}} with values
+  const doc = DocumentApp.openById(docId);
+  const body = doc.getBody();
+  Object.keys(dataObj).forEach(k => {
+    body.replaceText(`{{${k}}}`, String(dataObj[k] ?? ''));
+  });
+  doc.saveAndClose();
+
+  // Export as PDF
+  const blob = DriveApp.getFileById(docId).getAs('application/pdf');
+  const filename = `RC_${dataObj.record_id}__${(dataObj.Candidate_Name||'')}__${(dataObj.Referee_Name||'')}__${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd')}.pdf`
+                    .replace(/s+/g,'_');
+  const pdf = folder.createFile(blob).setName(filename);
+
+  // Cleanup temp Doc
+  DriveApp.getFileById(docId).setTrashed(true);
+
+  return pdf.getUrl();
+}
+
+/** Slack Helpers (DM to user via Slack ID lookup) **/
+
+function lookupSlackIdByEmail_(email) {
+  if (!email) return null;
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sh = ss.getSheetByName(SLACK_ID_TAB);
+  if (!sh) return null;
+  const data = sh.getDataRange().getValues();
+  const header = data[0] || [];
+  const emailIdx = header.indexOf(SLACK_ID_EMAIL_HDR);
+  const idIdx    = header.indexOf(SLACK_ID_ID_HDR);
+  if (emailIdx < 0 || idIdx < 0) return null;
+
+  for (let r = 1; r < data.length; r++) {
+    const rowEmail = String(data[r][emailIdx] || '').trim().toLowerCase();
+    if (rowEmail && rowEmail === String(email).trim().toLowerCase()) {
+      return String(data[r][idIdx] || '').trim();
+    }
+  }
+  return null;
+}
+
+function postToSlackUser_(slackId, text) {
+  if (!SLACK_BOT_TOKEN) {
+    console.log('SLACK_BOT_TOKEN not set; skipping Slack DM. Message would be:n' + text);
+    return;
+  }
+  const url = 'https://slack.com/api/chat.postMessage';
+  const payload = { channel: slackId, text: text };
+  UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json; charset=utf-8',
+    headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+}

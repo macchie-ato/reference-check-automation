@@ -1,0 +1,251 @@
+/**
+ * module12.prefill_email.ta_controlled.gs
+ * TA-controlled:
+ *  - TA ticks I (Process?) → validate gate; if OK, create A (Record_ID) + J (Prefilled_Link)
+ *  - TA ticks K (Draft Created?) → create Gmail DRAFT only; log L/M; revert K on failure
+ *  - J syncs when A/B change
+ */
+
+function _getSpreadsheet_() {
+  if (typeof USE_SHEET_ID !== 'undefined' && USE_SHEET_ID && typeof SHEET_ID === 'string') {
+    return SpreadsheetApp.openById(SHEET_ID);
+  }
+  return SpreadsheetApp.getActive();
+}
+function _getSheet_() {
+  const ss = _getSpreadsheet_();
+  const sh = ss.getSheetByName(REF_TAB);
+  if (!sh) throw new Error(`Sheet "${REF_TAB}" not found`);
+  return sh;
+}
+function _headerMap_(sh) {
+  const hdrVals = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(v => String(v).trim());
+  const map = {}; hdrVals.forEach((v,i)=> map[v]=i+1); return map;
+}
+function getCol_(sh, name) { return _headerMap_(sh)[name] || null; }
+
+function _assertHeaders_() {
+  if (!ENFORCE_HEADER_MATCH) return;
+  const sh = _getSheet_(), hm=_headerMap_(sh);
+  const miss = Object.values(HDR).filter(v => v && !hm[v]);
+  if (miss.length) {
+    const msg = `Header mismatch: Missing → ${miss.join(', ')}`;
+    SpreadsheetApp.getActive().toast(msg, 'Header Error', 10);
+    throw new Error(msg);
+  }
+}
+function _ensureCheckbox_(sh, colIdx) {
+  if (!colIdx) return;
+  const lastRow = Math.max(sh.getLastRow(), 2);
+  const rng = sh.getRange(2, colIdx, (lastRow-1)||1, 1);
+  const rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  rng.setDataValidation(rule);
+}
+function _enforceCheckboxes_() {
+  const sh = _getSheet_();
+  if (Array.isArray(CHECKBOX_FIELDS)) CHECKBOX_FIELDS.forEach(n => _ensureCheckbox_(sh, getCol_(sh,n)));
+}
+
+function _fallbackBuildPrefillUrl_(recordId, candidateId) {
+  const fid = (typeof sanitizeFormId_==='function') ? sanitizeFormId_(FORM_ID) : String(FORM_ID||'').split('?')[0];
+  const usingDe = fid && fid.indexOf('1FAIpQL')===0;
+  const base = usingDe ? 'https://docs.google.com/forms/d/e/'+fid+'/viewform?usp=pp_url'
+                       : 'https://docs.google.com/forms/d/'+fid+'/viewform?usp=pp_url';
+  const parts = [];
+  if (recordId && ENTRY_RECORD_ID) parts.push('entry.'+ENTRY_RECORD_ID+'='+encodeURIComponent(recordId));
+  if (candidateId && ENTRY_CANDIDATE_ID) parts.push('entry.'+ENTRY_CANDIDATE_ID+'='+encodeURIComponent(candidateId));
+  return parts.length ? base+'&'+parts.join('&') : base;
+}
+function _buildPrefillUrl_(recId, candId) {
+  try { if (typeof buildPrefillUrl_==='function') return buildPrefillUrl_(recId,candId); } catch(_){}
+  return _fallbackBuildPrefillUrl_(recId,candId);
+}
+
+function _gatePassed_(sh, row) {
+  const hm = _headerMap_(sh);
+  const names = Array.isArray(GATE_FIELDS) ? GATE_FIELDS : [];
+  if (!names.length) return false;
+  for (let i=0;i<names.length;i++){
+    const col = hm[names[i]];
+    const v = col ? sh.getRange(row,col).getValue() : '';
+    const ok = (v===true || v===false) ? v===true : String(v).trim()!=='';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+function _missingGateFields_(sh, row){
+  const hm=_headerMap_(sh);
+  const labelByName = {};
+  labelByName[HDR.candidateId]   = 'Candidate_ID (B)';
+  labelByName[HDR.candidateName] = 'Candidate_Name (C)';
+  labelByName[HDR.jobId]         = 'Job_ID (D)';
+  labelByName[HDR.refereeName]   = 'Referee_Name (E)';
+  labelByName[HDR.refereeEmail]  = 'Referee_Email (F)';
+  labelByName[HDR.taName]        = 'TA_Name (G)';
+  labelByName[HDR.taEmail]       = 'TA_Email (H)';
+  const miss=[];
+  (GATE_FIELDS||[]).forEach(n=>{
+    const col = hm[n];
+    const v = col ? sh.getRange(row,col).getValue() : '';
+    const ok = (v===true || v===false) ? v===true : String(v).trim()!=='';
+    if (!ok) miss.push(labelByName[n] || n);
+  });
+  return miss;
+}
+
+function _syncPrefillWhenIdsEdit_(sh, row, editedCol) {
+  const aCol = getCol_(sh, HDR.recordId)    || 1;
+  const bCol = getCol_(sh, HDR.candidateId) || 2;
+  const jCol = getCol_(sh, HDR.prefillLink) || 10;
+  if (editedCol !== aCol && editedCol !== bCol) return;
+  const recId  = String(sh.getRange(row,aCol).getValue()||'').trim();
+  const candId = String(sh.getRange(row,bCol).getValue()||'').trim();
+  if (recId || candId) sh.getRange(row,jCol).setValue(_buildPrefillUrl_(recId,candId));
+  else                 sh.getRange(row,jCol).clearContent();
+}
+
+/** Module 1: fires ONLY when TA toggles I (never auto) */
+function _onProcessToggle_(sh, row) {
+  const aCol = getCol_(sh, HDR.recordId)    || 1;
+  const bCol = getCol_(sh, HDR.candidateId) || 2;
+  const iCol = getCol_(sh, HDR.processFlag) || 9;
+  const jCol = getCol_(sh, HDR.prefillLink) || 10;
+
+  _ensureCheckbox_(sh, iCol);
+
+  const iVal = sh.getRange(row,iCol).getValue() === true;
+  if (!iVal) {
+    if (SHOW_TOASTS) SpreadsheetApp.getActive().toast(`Row ${row}: Process unset`, 'Module 1', 2);
+    return;
+  }
+
+  const passed = _gatePassed_(sh, row);
+  if (!passed) {
+    if (SHOW_TOASTS && TOAST_ON_BLOCK) {
+      const miss = _missingGateFields_(sh,row);
+      SpreadsheetApp.getActive().toast(`Row ${row}: Missing → ${miss.join(', ')}`, 'Prefill blocked', 6);
+    }
+    return; // TA keeps control; we don’t untick.
+  }
+
+  // Gate OK + TA asserted Process → ensure A + J
+  let recId = String(sh.getRange(row,aCol).getValue()||'').trim();
+  if (!recId) {
+    recId = Utilities.getUuid();
+    sh.getRange(row,aCol).setValue(recId);
+  }
+  const candId = String(sh.getRange(row,bCol).getValue()||'').trim();
+  const currJ  = String(sh.getRange(row,jCol).getValue()||'').trim();
+  if (!currJ) {
+    sh.getRange(row,jCol).setValue(_buildPrefillUrl_(recId,candId));
+  }
+  if (SHOW_TOASTS) SpreadsheetApp.getActive().toast(`Row ${row}: Prefill ready`, 'Module 1', 3);
+}
+
+/** Module 2: DRAFT ONLY — fired when TA toggles K (“Draft Created?”) */
+function handleEmailDraftForRow_(sh, row, showToast) {
+  const hm=_headerMap_(sh), col = n=> hm[n]||null;
+  const colRefEmail = col(HDR.refereeEmail) || 6;    // F
+  const colTAEmail  = col(HDR.taEmail)       || 8;    // H
+  const colCandNm   = col(HDR.candidateName) || 3;    // C
+  const colJobId    = col(HDR.jobId)         || 4;    // D
+  const colPrefURL  = col(HDR.prefillLink)   || 10;   // J
+  const colProcess  = col(HDR.processFlag)   || 9;    // I
+  const colK        = col(HDR.emailedCheckbox) || 11; // K (now “Draft Created?”)
+  const colDraftId  = col(HDR.emailDraftId)    || 12; // L
+  const colDraftAt  = col(HDR.emailDraftCreatedAt) || 13; // M
+
+  _ensureCheckbox_(sh, colK);
+  const kVal = sh.getRange(row,colK).getValue()===true;
+  if (!kVal) return; // only act when TA ticks K
+
+  // Must have Process tick + gate complete
+  const gateOk = _gatePassed_(sh,row);
+  const procOk = sh.getRange(row,colProcess).getValue()===true;
+  if (!(gateOk && procOk)) {
+    if (showToast && SHOW_TOASTS) SpreadsheetApp.getActive().toast(`Row ${row}: Gate/Process not ready — no draft`, 'Module 2', 4);
+    sh.getRange(row,colK).setValue(false); // revert
+    return;
+  }
+
+  // Idempotency: if L already has an ID, keep K true
+  const existing = String(sh.getRange(row,colDraftId).getValue()||'').trim();
+  if (existing) {
+    if (showToast && SHOW_TOASTS) SpreadsheetApp.getActive().toast(`Row ${row}: Draft exists (${existing})`, 'Module 2', 3);
+    return;
+  }
+
+  // Build draft
+  const toRef   = String(sh.getRange(row,colRefEmail).getValue()||'').trim();
+  const toTA    = String(sh.getRange(row,colTAEmail).getValue()||'').trim();
+  const candNm  = String(sh.getRange(row,colCandNm).getValue()||'').trim();
+  const jobId   = String(sh.getRange(row,colJobId).getValue()||'').trim();
+  const prefill = String(sh.getRange(row,colPrefURL).getValue()||'').trim();
+
+  const to = (TEST_MODE ? ADMIN_ALERT_EMAILS.join(',') : (toRef || ADMIN_ALERT_EMAILS.join(',')));
+  const cc = (TEST_MODE ? '' : toTA);
+  const subject = `[Reference Check] ${candNm || 'Candidate'} — Job ${jobId || ''}`.trim();
+  const body = [
+    `Hello,`,
+    ``,
+    `We’d appreciate a quick reference check for ${candNm || 'the candidate'}.`,
+    `Please use this link: ${prefill || '(prefilled link missing)'}`,
+    ``,
+    `Thank you!`,
+  ].join('n');
+
+  try {
+    const draft = GmailApp.createDraft(to, subject, body, cc ? {cc} : {});
+    const draftId = draft.getId();
+    const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd' 'HH:mm:ss");
+    sh.getRange(row,colDraftId).setValue(draftId); // L
+    sh.getRange(row,colDraftAt).setValue(ts);      // M
+    if (showToast && SHOW_TOASTS) SpreadsheetApp.getActive().toast(`Row ${row}: Draft created`, 'Module 2', 3);
+  } catch (err) {
+    sh.getRange(row,colK).setValue(false); // revert
+    SpreadsheetApp.getActive().toast(`Row ${row}: Draft error — ${err}`, 'Module 2', 6);
+    console.error('Draft creation failed:', err);
+  }
+}
+
+/** Events */
+function onEdit(e){
+  try{
+    if (!e || !e.range) return;
+    const sh = e.range.getSheet && e.range.getSheet();
+    if (!sh || sh.getName() !== REF_TAB) return;
+    const row = e.range.getRow && e.range.getRow();
+    if (!row || row<=1) return;
+    const col = (typeof e.range.getColumn==='function') ? e.range.getColumn() : e.range.columnStart;
+
+    // Keep Prefilled_Link synced to A/B edits
+    _syncPrefillWhenIdsEdit_(sh,row,col);
+
+    const iCol = getCol_(sh, HDR.processFlag)     || 9;
+    const kCol = getCol_(sh, HDR.emailedCheckbox) || 11; // “Draft Created?”
+
+    if (col === iCol){
+      _onProcessToggle_(sh,row);
+      return;
+    }
+    if (EMAIL_TICK_STRATEGY === 'manual_toggle' && col === kCol){
+      handleEmailDraftForRow_(sh,row,true);
+      return;
+    }
+    // No other auto-actions in TA-controlled mode
+  } catch(err){
+    SpreadsheetApp.getActive().toast('Module 1–2 onEdit error: '+err, 'Script error', 6);
+    console.error(err);
+  }
+}
+
+function onOpen(){
+  try{
+    _assertHeaders_();
+    _enforceCheckboxes_();
+  } catch(err){
+    SpreadsheetApp.getActive().toast('Module 1–2 onOpen error: '+err, 'Script error', 6);
+    console.error(err);
+  }
+}
