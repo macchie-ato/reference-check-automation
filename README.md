@@ -17,6 +17,7 @@ Automating the reference check workflow from start to finish — no more copy-pa
 
 ## 🧩 Modules & Structure
 
+<pre> <code>
 reference-check-automation/
 ├── scripts/ # Modular .gs scripts (GAS)
 │ ├── config.gs # Central config (IDs, tab names)
@@ -33,7 +34,7 @@ reference-check-automation/
 │ ├── slack_dm.png
 │ └── flowchart.png
 └── README.md
-
+</code> </pre>
 
 ---
 
