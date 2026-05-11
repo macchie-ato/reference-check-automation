@@ -69,6 +69,7 @@ the completed report. Falls back to email if the Slack DM fails.
 
 ## Structure
 
+```
 reference-check-automation/
 ├── scripts/
 │   ├── config.gs              # Central config — IDs, tab names
@@ -80,6 +81,7 @@ reference-check-automation/
 │   └── utils.gs               # Shared helpers
 ├── assets/                    # Redacted screenshots and flowchart
 └── README.md
+```
 
 ---
 
