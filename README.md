@@ -1,87 +1,113 @@
-# 📄 Reference Check Automation
+# Reference Check Automation
 
-Automating the reference check workflow from start to finish — no more copy-pasting, manual tracking, or “just following up” emails. This project turns the tedious into seamless using Google Apps Script, Docs, Sheets, and Slack. Built for lean PeopleOps teams that want to move fast and stay compliant.
-
----
-
-## ✨ Highlights
-
-- 📌 Auto-generates prefilled Google Form links per candidate and referee  
-- ✍️ Captures reference data and writes back to the masterlist on form submission  
-- 🧾 Creates polished PDF reports from Google Docs templates  
-- 📂 Organizes reports in structured Drive folders (by job ID & candidate name)  
-- 💬 Sends Slack notifications to recruiters — fallback to email if needed  
-- 🔒 Gated steps: no Slack DM unless PDF is created, no PDF unless verified  
+End-to-end reference check workflow using Google Apps Script, 
+Google Workspace, SmartRecruiters, and Slack.
 
 ---
 
-## 🧩 Modules & Structure
+## The problem
 
-<pre> <code>
+Reference checks are nobody's favourite part of the hiring process. 
+In most teams they look like this: recruiter emails candidate asking 
+for referee details, candidate replies eventually, recruiter emails 
+each referee separately, chases the ones who don't respond, manually 
+copies answers into a spreadsheet, formats a summary doc, sends it 
+to the hiring manager. Repeat for every hire.
+
+It's not complicated work. It's just a lot of steps that all depend 
+on someone remembering to do the next thing. Which means it's slow, 
+inconsistent, and the first thing that gets dropped when a recruiter 
+is juggling five open roles.
+
+This project automates the whole thing. The recruiter triggers it 
+once. Everything else runs itself.
+
+---
+
+## How it works
+
+The workflow is split into five sequential steps. Each one only runs 
+if the previous one completed successfully — nothing fires twice, 
+nothing skips ahead.
+
+**Step 1 — Prefill link generation**
+When a recruiter marks a candidate row in the masterlist, the script 
+auto-generates a prefilled Google Form link scoped to that candidate. 
+No manual copy-pasting of URLs.
+
+**Step 2 — Candidate submits referee details**
+The candidate fills out the form with referee names, job titles, and 
+contact details. This replaces the email thread that would normally 
+take two to three days.
+
+**Step 3 — Referee forms go out**
+On submission, the system generates a separate prefilled form for 
+each referee and sends it automatically. Responses write back to 
+the correct row in the masterlist in real time.
+
+**Step 4 — PDF generation**
+Once all referee responses are verified, a formatted PDF is built 
+from a Google Docs template and saved to a structured Drive folder 
+organised by job ID and candidate name.
+
+**Step 5 — Recruiter notification**
+A Slack DM goes to the requesting recruiter with a direct link to 
+the completed report. Falls back to email if the Slack DM fails.
+
+---
+
+## Stack
+
+- Google Apps Script (all automation logic)
+- Google Sheets (masterlist and tracker)
+- Google Forms (candidate and referee inputs)
+- Google Docs + Drive (PDF generation and storage)
+- SmartRecruiters (source of candidate data)
+- Slack (recruiter notifications)
+
+---
+
+## Structure
+
 reference-check-automation/
-├── scripts/ # Modular .gs scripts (GAS)
-│ ├── config.gs # Central config (IDs, tab names)
-│ ├── module1_prefill.gs # Prefill logic onEdit/onOpen
-│ ├── module2_emailDraft.gs# Draft email content w/ prefilled link
-│ ├── module3-1_verify.gs # Write-back from Form to Masterlist
-│ ├── module3-2_pdfGen.gs # PDF builder from template
-│ ├── module3-3_notify.gs # Slack DM (fallback to email)
-│ └── utils.gs # Helpers (date stamps, lookup, sanitizing)
-├── assets/ # Screenshots, PDF samples (redacted)
-│ ├── sample_form.png
-│ ├── sample_sheet.png
-│ ├── pdf_output.png
-│ ├── slack_dm.png
-│ └── flowchart.png
+├── scripts/
+│   ├── config.gs              # Central config — IDs, tab names
+│   ├── module1_prefill.gs     # Prefill logic on edit/open
+│   ├── module2_emailDraft.gs  # Draft email with prefilled link
+│   ├── module3-1_verify.gs    # Write-back from form to masterlist
+│   ├── module3-2_pdfGen.gs    # PDF builder from template
+│   ├── module3-3_notify.gs    # Slack DM with email fallback
+│   └── utils.gs               # Shared helpers
+├── assets/                    # Redacted screenshots and flowchart
 └── README.md
-</code> </pre>
 
 ---
 
-## 🛠️ How It Works
+## Setup
 
-| Step | Trigger | Module | Output |
-|------|---------|--------|--------|
-| ✅ Prefill Link Generation | `onEdit` / `onOpen` | `module1_prefill.gs` | Prefilled form URL |
-| ✉️ Email Draft | `onEdit` | `module2_emailDraft.gs` | Drafted message in sheet |
-| 🗂️ Write-Back + Verify | `onFormSubmit` | `module3-1_verify.gs` | Fills response data into tracker |
-| 📄 PDF Generation | Time/manual | `module3-2_pdfGen.gs` | Saves PDF to Drive |
-| 💬 Slack Notification | Manual | `module3-3_notify.gs` | Slack DM to TA / fallback email |
+1. Copy the Sheet, Form, and Docs templates into your own Drive
+2. Open config.gs and add your Sheet ID, Form ID, and Folder ID
+3. Add your Slack bot token via Script Properties — not hardcoded
+4. Edit the referee form templates if needed (peer vs. manager 
+   versions included)
+5. Set up triggers: onEdit, onFormSubmit, and time-based as needed
+6. Run a test with dummy data before going live
 
-All modules are **idempotent**, meaning they won’t duplicate actions if triggered again.
-
----
-
-## ⚙️ Setup
-
-1. **Copy the Sheet + Form + Template Docs** into your own Drive  
-2. Set up the config file:
-   - Add your Sheet ID, Form ID, Folder ID  
-   - Add your Slack bot token via **Script Properties**  
-3. Review and edit templates:
-   - One for peer, one for manager  
-4. Set up your triggers:
-   - `onEdit`, `onFormSubmit`, and/or time-based  
-5. Test with dummy data — PDF will only generate if submission is **verified**
+Real credentials have been stripped from all scripts. Use Script 
+Properties for anything sensitive.
 
 ---
 
-## 🔐 Security & Cleanup
+## What it doesn't do yet
 
-- Real values (tokens, IDs, emails) have been stripped  
-- Use **Script Properties** instead of hardcoding secrets  
-- Folder sharing defaults to off; no public links created  
-- Logs scrubbed of PII — easy to debug without risking data  
+There's no automated chasing built in. If a referee doesn't respond, 
+someone still has to follow up manually. The next version will add 
+time-based reminder emails to non-responding referees, with an 
+escalation to the recruiter if they still haven't replied after a 
+second nudge.
 
 ---
 
-## 📸 Visual Preview
+## Links
 
-> Place redacted screenshots in `/assets` and reference them here.
-
-```md
-![Form Prefill](./assets/sample_prefill%20form.png)
-![Masterlist Tracker](assets/sample_sheet.png)
-![PDF Output](assets/pdf_output.png)
-![Slack DM](assets/slack_dm.png)
-![Flow Overview](assets/flowchart.png)
+- Portfolio: https://macchie-ato.github.io
